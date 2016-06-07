@@ -19,11 +19,12 @@
 
 package org.apache.samza.migration
 
-import kafka.server.{KafkaConfig, KafkaServer}
-import kafka.utils.{TestUtils, TestZKUtils, Utils}
-import kafka.zk.EmbeddedZookeeper
-import org.I0Itec.zkclient.ZkClient
+import kafka.integration.KafkaServerTestHarness
+
+import kafka.server.KafkaConfig
+import kafka.utils.TestUtils
 import org.apache.kafka.clients.producer.{KafkaProducer, Producer, ProducerConfig, ProducerRecord}
+import org.apache.kafka.common.security.JaasUtils
 import org.apache.samza.checkpoint.Checkpoint
 import org.apache.samza.checkpoint.kafka.{KafkaCheckpointManager, KafkaCheckpointLogKey, KafkaCheckpointManagerFactory}
 import org.apache.samza.config._
@@ -44,71 +45,45 @@ import org.junit._
 import scala.collection.JavaConversions._
 import scala.collection._
 
-class TestKafkaCheckpointMigration {
+class TestKafkaCheckpointMigration extends KafkaServerTestHarness {
 
   val checkpointTopic = "checkpoint-topic"
   val serdeCheckpointTopic = "checkpoint-topic-invalid-serde"
   val checkpointTopicConfig = KafkaCheckpointManagerFactory.getCheckpointTopicProperties(null)
-  val zkConnect: String = TestZKUtils.zookeeperConnect
-  var zkClient: ZkClient = null
-  val zkConnectionTimeout = 6000
-  val zkSessionTimeout = 6000
 
-  val brokerId1 = 0
-  val brokerId2 = 1
-  val brokerId3 = 2
-  val ports = TestUtils.choosePorts(3)
-  val (port1, port2, port3) = (ports(0), ports(1), ports(2))
+  var producerConfig: KafkaProducerConfig = null
+  var metadataStore: TopicMetadataStore = null
+  var brokers: String = null
 
-  val props1 = TestUtils.createBrokerConfig(brokerId1, port1)
-  props1.put("controlled.shutdown.enable", "true")
-  val props2 = TestUtils.createBrokerConfig(brokerId2, port2)
-  props1.put("controlled.shutdown.enable", "true")
-  val props3 = TestUtils.createBrokerConfig(brokerId3, port3)
-  props1.put("controlled.shutdown.enable", "true")
-
-  val config = new java.util.HashMap[String, Object]()
-  val brokers = "localhost:%d,localhost:%d,localhost:%d" format (port1, port2, port3)
-  config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers)
-  config.put("acks", "all")
-  config.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "1")
-  config.put(ProducerConfig.RETRIES_CONFIG, (new Integer(java.lang.Integer.MAX_VALUE-1)).toString)
-  config.putAll(KafkaCheckpointManagerFactory.INJECTED_PRODUCER_PROPERTIES)
-  val producerConfig = new KafkaProducerConfig("kafka", "i001", config)
   val partition = new Partition(0)
   val partition2 = new Partition(1)
   val cp1 = new Checkpoint(Map(new SystemStreamPartition("kafka", "topic", partition) -> "123"))
   val cp2 = new Checkpoint(Map(new SystemStreamPartition("kafka", "topic", partition) -> "12345"))
-  var zookeeper: EmbeddedZookeeper = null
-  var server1: KafkaServer = null
-  var server2: KafkaServer = null
-  var server3: KafkaServer = null
-  var metadataStore: TopicMetadataStore = null
 
-  val systemStreamPartitionGrouperFactoryString = classOf[GroupByPartitionFactory].getCanonicalName
+  protected def numBrokers: Int = 3
+
+  def generateConfigs() = {
+    val props = TestUtils.createBrokerConfigs(numBrokers, zkConnect, true)
+    props.map(KafkaConfig.fromProps)
+  }
 
   @Before
-  def beforeSetupServers {
-    zookeeper = new EmbeddedZookeeper(zkConnect)
-    server1 = TestUtils.createServer(new KafkaConfig(props1))
-    server2 = TestUtils.createServer(new KafkaConfig(props2))
-    server3 = TestUtils.createServer(new KafkaConfig(props3))
+  override def setUp {
+    super.setUp
+    val config = new java.util.HashMap[String, Object]()
+    brokers = brokerList.split(",").map(p => "localhost" + p).mkString(",")
+
+    config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers)
+    config.put("acks", "all")
+    config.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "1")
+    config.put(ProducerConfig.RETRIES_CONFIG, (new Integer(java.lang.Integer.MAX_VALUE-1)).toString)
+    config.putAll(KafkaCheckpointManagerFactory.INJECTED_PRODUCER_PROPERTIES)
+    producerConfig = new KafkaProducerConfig("kafka", "i001", config)
     metadataStore = new ClientUtilTopicMetadataStore(brokers, "some-job-name")
   }
 
-  @After
-  def afterCleanLogDirs {
-    server1.shutdown
-    server1.awaitShutdown()
-    server2.shutdown
-    server2.awaitShutdown()
-    server3.shutdown
-    server3.awaitShutdown()
-    Utils.rm(server1.config.logDirs)
-    Utils.rm(server2.config.logDirs)
-    Utils.rm(server3.config.logDirs)
-    zookeeper.shutdown
-  }
+  val systemStreamPartitionGrouperFactoryString = classOf[GroupByPartitionFactory].getCanonicalName
+
 
   private def writeChangeLogPartitionMapping(changelogMapping: Map[TaskName, Integer], cpTopic: String = checkpointTopic) = {
     val producer: Producer[Array[Byte], Array[Byte]] = new KafkaProducer(producerConfig.getProducerProperties)
